@@ -1,0 +1,69 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# =========================
+# Django
+# =========================
+*.log
+db.sqlite3
+db.sqlite3-journal
+media/
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# Docker
+# =========================
+*.log
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.tmp
+*.temp

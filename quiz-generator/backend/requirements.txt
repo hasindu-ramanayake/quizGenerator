@@ -1,0 +1,16 @@
+Django>=5.0
+djangorestframework
+django-cors-headers
+psycopg2-binary
+python-dotenv
+langgraph
+langchain
+langchain-core
+langchain-google-genai
+langchain-anthropic
+langchain-community
+PyMuPDF
+dj-database-url
+pydantic
+duckduckgo-search
+ddgs
