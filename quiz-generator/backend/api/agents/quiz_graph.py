@@ -1,9 +1,12 @@
 import fitz  # PyMuPDF
+import logging
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 from django.conf import settings
 import os
 import json
+
+logger = logging.getLogger('quiz_graph')
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -65,28 +68,34 @@ class QuizState(TypedDict):
 
 # Node 1: Extract Text
 def extract_text_node(state: QuizState) -> QuizState:
+    logger.debug("[extract_text] Starting PDF extraction for document_id=%s", state.get('document_id'))
     try:
         pdf_path = state['pdf_path']
         if not os.path.isabs(pdf_path):
             pdf_path = os.path.join(settings.MEDIA_ROOT, pdf_path)
+        logger.debug("[extract_text] Opening PDF: %s", pdf_path)
             
         doc = fitz.open(pdf_path)
         text = ""
         for page in doc:
             text += page.get_text()
         state['text_content'] = text
+        logger.debug("[extract_text] Extracted %d characters from %d pages", len(text), len(doc))
     except Exception as e:
+        logger.error("[extract_text] PDF Extraction failed: %s", str(e))
         state['error'] = f"PDF Extraction failed: {str(e)}"
     return state
 
 # Node 2: Identify Concepts
 def identify_concepts_node(state: QuizState) -> QuizState:
     if state.get('error'): return state
+    logger.debug("[identify_concepts] Starting concept identification for %d questions", state.get('questions_count', 0))
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-3-flash-preview", temperature=0.2, rate_limiter=rate_limiter
         )
         structured_llm = llm.with_structured_output(ConceptSchema)
+        logger.debug("[identify_concepts] LLM initialized (model=gemini-3-flash-preview, temp=0.2)")
         
         prompt = f"""
         IDENTITY: You are a Senior Curriculum Strategist specializing in deep-learning extraction.
@@ -104,26 +113,32 @@ def identify_concepts_node(state: QuizState) -> QuizState:
         TEXT:
         {state['text_content'][:25000]}
         """
+        logger.debug("[identify_concepts] Invoking LLM for concept extraction...")
         output = structured_llm.invoke(prompt)
         state['concepts'] = output.concepts
+        logger.debug("[identify_concepts] Identified %d concepts: %s", len(output.concepts), output.concepts)
         state['verification_errors'] = [] # Initialize empty errors for the loop
     except Exception as e:
+        logger.error("[identify_concepts] Failed: %s", str(e))
         state['error'] = f"Concept Identification failed: {str(e)}"
     return state
 
 # Node 3: Generate Quiz (Tool calling enabled)
 def generate_quiz_node(state: QuizState) -> QuizState:
     if state.get('error'): return state
+    logger.debug("[generate_quiz] Starting quiz generation for %d questions, types=%s", state.get('questions_count', 0), state.get('question_types'))
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-3-flash-preview", temperature=0.7, rate_limiter=rate_limiter
         )
         # We bind the search tool to the LLM so it can fact check
         llm_with_tools = llm.bind_tools([search_tool])
+        logger.debug("[generate_quiz] LLM initialized with tools (model=gemini-3-flash-preview, temp=0.7)")
         
         errors_context = ""
         if state.get('verification_errors'):
             errors_context = f"PREVIOUS ERRORS YOU MUST FIX:\n{chr(10).join(state['verification_errors'])}\n\n"
+            logger.debug("[generate_quiz] Re-generating with %d previous errors to fix", len(state['verification_errors']))
 
         system_msg = SystemMessage(content=f"""
         IDENTITY: You are an Expert Assessment Designer.
@@ -153,42 +168,53 @@ def generate_quiz_node(state: QuizState) -> QuizState:
         user_msg = HumanMessage(content=f"Generate the quiz based on this text:\n{state['text_content'][:25000]}")
         
         # Invoke LLM (it might decide to use a tool)
+        logger.debug("[generate_quiz] Invoking LLM (with tools)...")
         response = llm_with_tools.invoke([system_msg, user_msg])
+        logger.debug("[generate_quiz] LLM responded, content length=%d, tool_calls=%d", len(response.content or ''), len(response.tool_calls or []))
         
         # If the LLM called the search tool, execute it and pass result back
         if response.tool_calls:
+            logger.debug("[generate_quiz] Executing %d tool call(s)...", len(response.tool_calls))
             messages = [system_msg, user_msg, response]
             for tool_call in response.tool_calls:
+                logger.debug("[generate_quiz] Tool call: %s", tool_call)
                 # Execute tool
                 tool_msg = search_tool.invoke(tool_call)
                 messages.append(tool_msg)
             # Re-invoke with tool results
+            logger.debug("[generate_quiz] Re-invoking LLM with tool results...")
             final_response = llm_with_tools.invoke(messages)
             content_to_parse = final_response.content
         else:
             content_to_parse = response.content
 
         # Now force format into our schema
+        logger.debug("[generate_quiz] Parsing response into structured output...")
         structured_llm = llm.with_structured_output(QuizOutputSchema)
         final_output = structured_llm.invoke(f"Extract the generated quiz from this text into the required JSON schema:\n{content_to_parse}")
         
         # Programmatic Security: Strictly slice the array to the requested count to prevent leakage
         generated_data = [q.model_dump() for q in final_output.questions]
         state['quiz_data'] = generated_data[:state.get('questions_count')]
+        logger.debug("[generate_quiz] Generated %d questions (sliced to %d)", len(generated_data), len(state['quiz_data']))
         
         state['verification_errors'] = [] # Clear errors since we generated a new batch
         
     except Exception as e:
+        logger.error("[generate_quiz] Failed: %s", str(e))
         state['error'] = f"Quiz Generation failed: {str(e)}"
     return state
 
 # Node 4: Devil's Advocate (Distractor Improver)
 def devils_advocate_node(state: QuizState) -> QuizState:
     if state.get('error'): return state
-    # Only run if there are MCQs
-    if not any(q['question_type'] == 'MCQ' for q in state['quiz_data']):
+    # Run for MCQ and MCQ_MULTI questions (skip TRUE_FALSE — only 2 fixed choices)
+    eligible_questions = [q for q in state['quiz_data'] if q['question_type'] in ('MCQ', 'MCQ_MULTI')]
+    if not eligible_questions:
+        logger.debug("[devils_advocate] Skipping — no MCQ or MCQ_MULTI questions found")
         return state
-        
+    
+    logger.debug("[devils_advocate] Starting distractor improvement for %d questions (MCQ + MCQ_MULTI)", len(eligible_questions))
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-3-flash-preview", temperature=0.6, rate_limiter=rate_limiter
@@ -197,10 +223,10 @@ def devils_advocate_node(state: QuizState) -> QuizState:
         
         system_msg = SystemMessage(content=f"""
         IDENTITY: You are an Expert Distractor Designer and Senior Educational Psychometrician.
-        OBJECTIVE: Review the generated Multiple Choice Questions (MCQs) and replace 1 or 2 weak or obvious "wrong" answers with highly plausible distractors based on common student misconceptions.
+        OBJECTIVE: Review the generated MCQ and MCQ_MULTI questions and replace 1 or 2 weak or obvious "wrong" answers with highly plausible distractors based on common student misconceptions.
         
         REASONING PROCESS:
-        1. For each MCQ, analyze the correct answer and the source text.
+        1. For each question, analyze the correct answer(s) and the source text.
         2. Identify why a student might be confused (common misconceptions, similar terms, logical fallacies).
         3. Use the 'thought_process' field to explain which options you are replacing and why the new ones are trickier.
         
@@ -208,41 +234,49 @@ def devils_advocate_node(state: QuizState) -> QuizState:
         - You MUST use the search_tool to look up common student misconceptions or pedagogical challenges related to the concepts if you aren't certain.
         
         CONSTRAINTS:
-        - DO NOT change the correct answer.
+        - DO NOT change any correct answer(s).
         - DO NOT change the question text.
-        - Maintain EXACTLY 4 choices for MCQs.
-        - Only modify questions of type 'MCQ'.
+        - DO NOT modify TRUE_FALSE questions — skip them entirely.
+        - For 'MCQ' questions: maintain EXACTLY 4 choices with exactly 1 correct answer.
+        - For 'MCQ_MULTI' questions: maintain the same number of choices (4-6) and keep all correct answers unchanged. Only replace incorrect choices.
         - If you replace a distractor, you MUST also update the question's `explanation` field so it explicitly explains the specific trap for the new distractor you introduced.
         
-        OUTPUT FORMAT: Final output must be the updated quiz data in the required JSON schema.
+        OUTPUT FORMAT: Final output must be the updated quiz data in the required JSON schema. Include ALL questions (even unmodified TRUE_FALSE ones) in the output.
         """)
         
-        user_msg = HumanMessage(content=f"Improve these MCQs by making distractors trickier. Source Text Context:\n{state['text_content'][:10000]}\n\nCurrent Quiz Data:\n{json.dumps(state['quiz_data'])}")
+        user_msg = HumanMessage(content=f"Improve the distractors in MCQ and MCQ_MULTI questions. Source Text Context:\n{state['text_content'][:10000]}\n\nCurrent Quiz Data:\n{json.dumps(state['quiz_data'])}")
         
+        logger.debug("[devils_advocate] Invoking LLM (with tools)...")
         response = llm_with_tools.invoke([system_msg, user_msg])
+        logger.debug("[devils_advocate] LLM responded, tool_calls=%d", len(response.tool_calls or []))
         
         if response.tool_calls:
+            logger.debug("[devils_advocate] Executing %d tool call(s)...", len(response.tool_calls))
             messages = [system_msg, user_msg, response]
             for tool_call in response.tool_calls:
+                logger.debug("[devils_advocate] Tool call: %s", tool_call)
                 tool_msg = search_tool.invoke(tool_call)
                 messages.append(tool_msg)
             response = llm_with_tools.invoke(messages)
 
         # Parse back into schema
+        logger.debug("[devils_advocate] Parsing improved quiz into structured output...")
         structured_llm = llm.with_structured_output(QuizOutputSchema)
         final_output = structured_llm.invoke(f"Extract the improved quiz into JSON schema:\n{response.content}")
         
         # Merge changes
         state['quiz_data'] = [q.model_dump() for q in final_output.questions]
+        logger.debug("[devils_advocate] Distractor improvement complete, %d questions updated", len(state['quiz_data']))
         
     except Exception as e:
         # If this fails, we just log it and continue with original data to avoid breaking the flow
-        print(f"Devil's Advocate failed: {str(e)}")
+        logger.warning("[devils_advocate] Failed (non-fatal, continuing): %s", str(e))
     return state
 
 # Node 5: Answer Verification
 def verify_answers_node(state: QuizState) -> QuizState:
     if state.get('error'): return state
+    logger.debug("[verify_answers] Starting answer verification for %d questions", len(state.get('quiz_data', [])))
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-3-flash-preview", temperature=0.1, rate_limiter=rate_limiter
@@ -263,16 +297,21 @@ def verify_answers_node(state: QuizState) -> QuizState:
         
         Quiz Data: {json.dumps(state['quiz_data'])}
         """
+        logger.debug("[verify_answers] Invoking LLM for factual verification...")
         output = llm.invoke(prompt)
+        logger.debug("[verify_answers] Result: is_valid=%s", output.is_valid)
         if not output.is_valid:
+            logger.debug("[verify_answers] Feedback: %s", output.feedback)
             state['verification_errors'].append(f"Answer Verification Failed: {output.feedback}")
     except Exception as e:
+        logger.error("[verify_answers] Failed: %s", str(e))
         state['error'] = f"Answer Verification failed: {str(e)}"
     return state
 
 # Node 5: Format Verification
 def verify_questions_node(state: QuizState) -> QuizState:
     if state.get('error'): return state
+    logger.debug("[verify_questions] Starting format verification for %d questions", len(state.get('quiz_data', [])))
     for idx, q in enumerate(state.get('quiz_data', [])):
         q_type = q.get('question_type')
         allowed_types = state.get('question_types', ['MCQ'])
@@ -307,6 +346,7 @@ def verify_questions_node(state: QuizState) -> QuizState:
 # Node 6: Duplicate Checker
 def check_duplicates_node(state: QuizState) -> QuizState:
     if state.get('error'): return state
+    logger.debug("[check_duplicates] Starting duplicate check for %d questions", len(state.get('quiz_data', [])))
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-3-flash-preview", temperature=0.1, rate_limiter=rate_limiter
@@ -325,26 +365,35 @@ def check_duplicates_node(state: QuizState) -> QuizState:
         
         Quiz Data: {json.dumps(state['quiz_data'])}
         """
+        logger.debug("[check_duplicates] Invoking LLM for duplicate detection...")
         output = llm.invoke(prompt)
+        logger.debug("[check_duplicates] Result: is_valid=%s", output.is_valid)
         if not output.is_valid:
+            logger.debug("[check_duplicates] Feedback: %s", output.feedback)
             state['verification_errors'].append(f"Duplicate Verification Failed: {output.feedback}")
     except Exception as e:
+        logger.error("[check_duplicates] Failed: %s", str(e))
         state['error'] = f"Duplicate Verification failed: {str(e)}"
     return state
 
 # Conditional Edge router
 def route_verification(state: QuizState) -> str:
     if state.get('error'):
+        logger.debug("[route] Error detected, routing to END: %s", state['error'])
         return "end" # Early exit on critical error
     
-    if len(state.get('verification_errors', [])) > 0:
+    errors = state.get('verification_errors', [])
+    if len(errors) > 0:
+        logger.debug("[route] %d verification error(s) found, routing back to generate_quiz: %s", len(errors), errors)
         return "generate_quiz" # Loop back
-        
+    
+    logger.debug("[route] All verifications passed, routing to save_quiz")
     return "save_quiz" # Proceed to save
 
 # Node 7: Save Quiz
 def save_quiz_node(state: QuizState) -> QuizState:
     if state.get('error'): return state
+    logger.debug("[save_quiz] Saving quiz to database...")
     try:
         user = User.objects.get(id=state['user_id'])
         doc = Document.objects.get(id=state['document_id'])
@@ -371,7 +420,9 @@ def save_quiz_node(state: QuizState) -> QuizState:
         state['quiz_id'] = quiz.id
         doc.processed = True
         doc.save()
+        logger.debug("[save_quiz] Quiz saved successfully (quiz_id=%d, %d questions)", quiz.id, len(state['quiz_data']))
     except Exception as e:
+        logger.error("[save_quiz] Database save failed: %s", str(e))
         state['error'] = f"Database save failed: {str(e)}"
     return state
 

@@ -29,8 +29,11 @@ export const documentService = {
   generateQuiz: (documentId, count, title, types) => {
     return api.post(`/documents/${documentId}/generate-quiz/`, { count, title, types });
   },
-  generateLectureNotes: (documentId, title) => {
-    return api.post(`/documents/${documentId}/generate-lecture-notes/`, { title });
+  generateLectureNotes: (documentId, title, extendedContext = false) => {
+    return api.post(`/documents/${documentId}/generate-lecture-notes/`, { 
+      title, 
+      extended_context: extendedContext 
+    });
   },
   getAll: () => api.get('/documents/'),
   delete: (id) => api.delete(`/documents/${id}/`),
@@ -54,6 +57,7 @@ export const lectureNoteService = {
   getAll: () => api.get('/lecture-notes/'),
   getById: (id) => api.get(`/lecture-notes/${id}/`),
   delete: (id) => api.delete(`/lecture-notes/${id}/`),
+  downloadMarkdownUrl: (id) => `${API_URL}/api/lecture-notes/${id}/download-markdown/`,
 };
 export const mnemonicService = {
   getAll: () => api.get('/mnemonics/'),

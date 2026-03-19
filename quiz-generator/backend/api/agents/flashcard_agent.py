@@ -1,6 +1,9 @@
+import logging
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 from api.models import Question, Choice
+
+logger = logging.getLogger('flashcard_agent')
 
 class FlashcardSchema(BaseModel):
     thought_process: str = Field(description="Analyze the user's mistake and determine the core fact they need to memorize.")
@@ -8,11 +11,13 @@ class FlashcardSchema(BaseModel):
     back: str = Field(description="The back of the flashcard (the correct answer)")
 
 def generate_flashcard_from_wrong_answer(question: Question, user_text: str = None):
+    logger.debug("[flashcard] Generating flashcard for question_id=%d", question.id)
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-3-flash-preview", temperature=0.7
         )
         structured_llm = llm.with_structured_output(FlashcardSchema)
+        logger.debug("[flashcard] LLM initialized (model=qwen3.5:9b, temp=0.7)")
         
         correct_choices = question.choices.filter(is_correct=True)
         correct_text = ", ".join([c.text for c in correct_choices])
@@ -39,7 +44,9 @@ def generate_flashcard_from_wrong_answer(question: Question, user_text: str = No
         User's wrong understanding (if any): {user_text or 'N/A'}
         """
         
+        logger.debug("[flashcard] Invoking LLM...")
         output = structured_llm.invoke(prompt)
+        logger.debug("[flashcard] LLM responded, front='%s'", output.front[:80])
         
         # Create the new Flashcard Question tied to the same Quiz
         flashcard_q = Question.objects.create(
@@ -48,7 +55,8 @@ def generate_flashcard_from_wrong_answer(question: Question, user_text: str = No
             explanation=output.back, # We'll store the back of the card in the explanation field
             question_type='FLASHCARD'
         )
+        logger.debug("[flashcard] Flashcard saved (question_id=%d)", flashcard_q.id)
         return flashcard_q
     except Exception as e:
-        print(f"Failed to generate flashcard: {str(e)}")
+        logger.error("[flashcard] Failed: %s", str(e))
         return None

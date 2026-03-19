@@ -58,6 +58,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "document_id": document.id,
             "pdf_path": document.file.path,
             "title": request.data.get('title', f"Lecture Notes: {document.title}"),
+            "extended_context": request.data.get('extended_context', False),
+            "research_context": "",
             "content": "",
             "error": None
         }
@@ -75,6 +77,17 @@ class LectureNoteViewSet(viewsets.ModelViewSet):
     queryset = LectureNote.objects.all()
     serializer_class = LectureNoteSerializer
     permission_classes = [permissions.AllowAny]
+
+    @action(detail=True, methods=['get'], url_path='download-markdown')
+    def download_markdown(self, request, pk=None):
+        """Download the lecture note content as a .md file."""
+        note = self.get_object()
+        filename = f"{note.title.replace(' ', '_').lower()}.md"
+        
+        from django.http import HttpResponse
+        response = HttpResponse(note.content, content_type='text/markdown; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 class QuizViewSet(viewsets.ModelViewSet):
     queryset = Quiz.objects.all()

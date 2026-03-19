@@ -1,3 +1,4 @@
+import logging
 from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -6,6 +7,8 @@ from pydantic import BaseModel, Field
 
 from api.models import Question, Mnemonic
 from django.contrib.auth.models import User
+
+logger = logging.getLogger('mnemonic_agent')
 
 class MnemonicActionSchema(BaseModel):
     thought_process: str = Field(description="Analyze the concept and figure out a simple acronym, silly rhyme, or visual mapping.")
@@ -22,6 +25,7 @@ class MnemonicState(TypedDict):
     error: Optional[str]
 
 def extract_content_node(state: MnemonicState) -> MnemonicState:
+    logger.debug("[extract_content] Fetching question_id=%d", state.get('question_id', 0))
     try:
         question = Question.objects.get(id=state['question_id'])
         state['question_text'] = question.text
@@ -33,18 +37,21 @@ def extract_content_node(state: MnemonicState) -> MnemonicState:
             state['correct_answer'] = question.explanation
         else:
             state['correct_answer'] = f"Correct Answer(s): {', '.join(correct_choices)}\nContext: {question.explanation}"
-            
+        logger.debug("[extract_content] Question: '%s', Answer: '%s'", state['question_text'][:80], state['correct_answer'][:80])
     except Exception as e:
+        logger.error("[extract_content] Failed: %s", str(e))
         state['error'] = f"Failed to fetch question: {str(e)}"
     return state
 
 def generate_trick_node(state: MnemonicState) -> MnemonicState:
     if state.get('error'): return state
+    logger.debug("[generate_trick] Starting mnemonic generation...")
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-3-flash-preview", temperature=0.9
         )
         structured_llm = llm.with_structured_output(MnemonicActionSchema)
+        logger.debug("[generate_trick] LLM initialized (model=qwen3.5:9b, temp=0.9)")
         
         prompt = f"""
         IDENTITY: You are a Master Mnemonist and Memory Coach.
@@ -66,14 +73,18 @@ def generate_trick_node(state: MnemonicState) -> MnemonicState:
         {state['correct_answer']}
         """
         
+        logger.debug("[generate_trick] Invoking LLM...")
         output = structured_llm.invoke(prompt)
         state['memory_trick'] = output.memory_trick
+        logger.debug("[generate_trick] Mnemonic generated: '%s'", output.memory_trick[:100])
     except Exception as e:
+        logger.error("[generate_trick] Failed: %s", str(e))
         state['error'] = f"Failed to generate mnemonic: {str(e)}"
     return state
 
 def save_mnemonic_node(state: MnemonicState) -> MnemonicState:
     if state.get('error'): return state
+    logger.debug("[save_mnemonic] Saving mnemonic to database...")
     try:
         user = User.objects.get(id=state['user_id'])
         question = Question.objects.get(id=state['question_id'])
@@ -84,7 +95,9 @@ def save_mnemonic_node(state: MnemonicState) -> MnemonicState:
             memory_trick=state['memory_trick']
         )
         state['mnemonic_id'] = mnemonic.id
+        logger.debug("[save_mnemonic] Mnemonic saved (mnemonic_id=%d)", mnemonic.id)
     except Exception as e:
+        logger.error("[save_mnemonic] Failed: %s", str(e))
         state['error'] = f"Failed to save mnemonic: {str(e)}"
     return state
 

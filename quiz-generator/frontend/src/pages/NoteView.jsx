@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { lectureNoteService } from '../services/apiService';
-import { ArrowLeftIcon, ArrowPathIcon, ArrowDownTrayIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ArrowPathIcon, ArrowDownTrayIcon, DocumentArrowDownIcon } from '@heroicons/react/24/outline';
 import ReactMarkdown from 'react-markdown';
 import { jsPDF } from 'jspdf';
 
@@ -82,6 +82,19 @@ const NoteView = () => {
      doc.save(filename);
   };
 
+  const downloadMarkdown = () => {
+    if (!note) return;
+    const blob = new Blob([note.content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${note.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center h-full p-20">
@@ -119,14 +132,24 @@ const NoteView = () => {
                 Generated {new Date(note.created_at).toLocaleDateString()}
               </p>
             </div>
-            <button
-               onClick={exportNoteToPDF}
-               className="flex items-center gap-2 px-5 py-2.5 bg-indigo-50 hover:bg-indigo-600 text-indigo-600 hover:text-white rounded-xl font-bold transition-all shrink-0"
-               title="Export as PDF"
-            >
-               <ArrowDownTrayIcon className="h-5 w-5" />
-               Export PDF
-            </button>
+            <div className="flex items-center gap-3">
+               <button
+                  onClick={downloadMarkdown}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-emerald-50 hover:bg-emerald-600 text-emerald-600 hover:text-white rounded-xl font-bold transition-all shrink-0"
+                  title="Download as Markdown"
+               >
+                  <DocumentArrowDownIcon className="h-5 w-5" />
+                  Download .md
+               </button>
+               <button
+                  onClick={exportNoteToPDF}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-indigo-50 hover:bg-indigo-600 text-indigo-600 hover:text-white rounded-xl font-bold transition-all shrink-0"
+                  title="Export as PDF"
+               >
+                  <ArrowDownTrayIcon className="h-5 w-5" />
+                  Export PDF
+               </button>
+            </div>
          </div>
 
          <div className="prose prose-lg prose-indigo max-w-none text-gray-700 leading-relaxed" ref={contentRef}>

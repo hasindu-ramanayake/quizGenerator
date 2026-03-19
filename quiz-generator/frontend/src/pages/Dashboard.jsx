@@ -61,7 +61,7 @@ const Dashboard = () => {
       const uploadRes = await documentService.upload(file);
       const docId = uploadRes.data.id;
 
-      const notesRes = await documentService.generateLectureNotes(docId, file.name);
+      const notesRes = await documentService.generateLectureNotes(docId, file.name, extendedSearch);
       
       navigate(`/lecture-note/${notesRes.data.id}`);
     } catch (err) {
